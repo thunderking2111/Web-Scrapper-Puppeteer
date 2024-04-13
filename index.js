@@ -1,14 +1,14 @@
 const puppeteer = require("puppeteer");
 
 const DEV_MODE = true;
-const RESULTS_SCROLL_DELAY = 1000;
+const RESULTS_SCROLL_DELAY = 2000;
 const OBSERVER_DELAY = 5000;
-const MAX_SCROLLS = 500;
+const MAX_SCROLLS = 120;
 
 const SELECTORS = {
     searchBoxInput: "input#searchboxinput",
     searchButton: "button#searchbox-searchbutton",
-    restltList: "div[role='feed']",
+    resultList: "div[role='feed']",
     resultItem: "div[role='feed'] a[aria-label][href^='https://www.google.com/maps/']",
     infoDisplayBox: "div[role='main']",
     title: "div[role='main'][aria-label] h1:last-of-type",
@@ -33,7 +33,7 @@ class ElNotFoundError extends Error {
 
 const sleep = (delay = 1000) => new Promise((resolve) => setTimeout(resolve, delay));
 
-function waitForEl(selector) {
+function waitForEl(selector, delay = OBSERVER_DELAY) {
     return new Promise((resolve, reject) => {
         const observer = new MutationObserver((mutationsList) => {
             mutationsList.forEach((mutation) => {
@@ -48,19 +48,27 @@ function waitForEl(selector) {
         setTimeout(() => {
             observer.disconnect(); // Stop observing on timeout
             reject(new ElNotFoundError(selector));
-        }, OBSERVER_DELAY);
+        }, delay);
 
         observer.observe(document.body, { childList: true, subtree: true });
     });
 }
 
+/**
+ * @param {puppeteer.Page} page
+ * @param {puppeteer.ElementHandle} resultsListHandle
+ */
 async function scrollResultsList(page, resultsListHandle) {
-    await resultsListHandle.evaluate((resultsSection) => {
-        if (resultsSection) {
-            resultsSection.scrollTop = resultsSection.scrollHeight;
+    return await resultsListHandle.evaluate(async (resultsSection) => {
+        resultsSection.scrollTop = resultsSection.scrollHeight;
+        if (
+            resultsSection.lastChild &&
+            resultsSection.lastChild.textContent &&
+            resultsSection.lastChild.textContent.includes("end of the list")
+        ) {
+            return true;
         }
     });
-    await sleep(RESULTS_SCROLL_DELAY); // Adjust delay as needed
 }
 
 async function scrapUrl(url) {
@@ -70,22 +78,22 @@ async function scrapUrl(url) {
     });
     const page = await browser.newPage();
     console.log("Browser");
-    // await new Promise((resolve) => setTimeout(() => resolve()), 10000);
     try {
-        await page.goto(url);
+        await page.goto(url, { timeout: 60000 });
     } catch (e) {
         if (e instanceof puppeteer.TimeoutError) {
-            console.log("========== Caught Error ===========");
-            console.log(e);
+            console.log("Stopped at loading url");
         } else {
             throw e;
         }
+        return;
     }
     console.log("URL");
+    await page.waitForSelector(SELECTORS.searchBoxInput);
     await page.type(SELECTORS.searchBoxInput, "hotels in new york");
     await page.click(SELECTORS.searchButton);
     try {
-        await page.waitForNavigation({ waitUntil: "networkidle0" });
+        await page.waitForNavigation({ waitUntil: "networkidle0", timeout: 60000 });
     } catch (e) {
         if (e instanceof puppeteer.TimeoutError) {
             console.log("========== Caught Error ===========");
@@ -95,8 +103,9 @@ async function scrapUrl(url) {
         }
     }
     console.log("Done Fetching");
-    // 1 second delay so that all the loading could be finished
-    await sleep(0);
+    await page.waitForSelector(SELECTORS.resultList);
+    // Let the fetched results be loaded into DOM
+    await sleep();
 
     // Expose necessary data to the browser context
     await page.exposeFunction("getWindowData", () => {
@@ -118,17 +127,13 @@ async function scrapUrl(url) {
     });
 
     // Store the reference to the results section
-    const resultsListHandle = await page.$(SELECTORS.restltList);
-    let previousHeight = 0;
+    const resultsListHandle = await page.$(SELECTORS.resultList);
     for (let i = 0; i < MAX_SCROLLS; i++) {
-        await scrollResultsList(page, resultsListHandle);
-        const newHeight = await resultsListHandle.evaluate((resultsList) => {
-            return resultsList ? resultsList.scrollHeight : 0;
-        });
-        if (newHeight === previousHeight) {
-            break; // No more results loaded
+        const shouldBreak = await scrollResultsList(page, resultsListHandle);
+        if (shouldBreak) {
+            break;
         }
-        previousHeight = newHeight;
+        await sleep(RESULTS_SCROLL_DELAY);
     }
 
     const somedata = await resultsListHandle.evaluate(async (resultsList) => {
@@ -163,7 +168,8 @@ async function scrapUrl(url) {
                     }
                 }
                 const infoBox = document.querySelectorAll(SELECTORS.infoDisplayBox)[infoBoxIndex];
-                res.title = infoBox.querySelector(SELECTORS.title).textContent;
+                const titleEl = infoBox.querySelector(SELECTORS.title);
+                res.title = titleEl && titleEl.textContent;
                 const ratingSiblingEl = infoBox.querySelector(SELECTORS.ratingSibling);
                 let ratingEl;
                 let prevEl;
@@ -174,30 +180,38 @@ async function scrapUrl(url) {
                     }
                     prevEl = el;
                 }
-                res.rating = ratingEl.textContent;
-                res.reviewScore = infoBox.querySelector(SELECTORS.reviews).textContent;
-                res.category = infoBox.querySelector(SELECTORS.category).textContent;
-                res.address = infoBox.querySelector(SELECTORS.address).textContent;
-                res.website = infoBox.querySelector(SELECTORS.website).textContent;
-                res.phone = infoBox.querySelector(SELECTORS.phone).textContent;
+                res.rating = ratingEl && ratingEl.textContent;
+                const reviewScoreEl = infoBox.querySelector(SELECTORS.reviews).textContent;
+                res.reviewScore = reviewScoreEl && reviewScoreEl.textContent;
+                const categoryEl = infoBox.querySelector(SELECTORS.category);
+                res.category = categoryEl && categoryEl.textContent;
+                const addressEl = infoBox.querySelector(SELECTORS.address);
+                res.address = addressEl && addressEl.textContent;
+                const websiteEl = infoBox.querySelector(SELECTORS.website);
+                res.website = websiteEl && websiteEl.textContent;
+                const phoneEl = infoBox.querySelector(SELECTORS.phone);
+                res.phone = phoneEl && phoneEl.textContent;
                 const openingHoursBtn = infoBox.querySelector(SELECTORS.openHoursButton);
                 if (openingHoursBtn) {
+                    let openingHoursTable = undefined;
                     try {
-                        await waitForEl(SELECTORS.openHoursTable);
+                        openingHoursTable = await waitForEl(SELECTORS.openHoursTable);
                     } catch (error) {
                         if (!(error instanceof ElNotFoundError)) {
                             throw error;
                         }
+                        openingHoursTable = undefined;
                     }
-                    const openingHoursTable = infoBox.querySelector(SELECTORS.openHoursTable);
-                    res.openingHoursData = Array.from(
-                        openingHoursTable.querySelectorAll("tbody tr"),
-                    ).map((tr) => {
-                        const tdEls = tr.querySelectorAll("td");
-                        const data = {};
-                        data[tdEls[0].textContent] = tdEls[1].textContent;
-                        return data;
-                    });
+                    if (openingHoursTable) {
+                        res.openingHoursData = Array.from(
+                            openingHoursTable.querySelectorAll("tbody tr"),
+                        ).map((tr) => {
+                            const tdEls = tr.querySelectorAll("td");
+                            const data = {};
+                            data[tdEls[0].textContent] = tdEls[1].textContent;
+                            return data;
+                        });
+                    }
                 }
                 results.push(res);
             }
