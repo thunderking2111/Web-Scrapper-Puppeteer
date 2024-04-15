@@ -5,3 +5,5 @@
 *.json
 */lib
 */lib/**/*
+/reports
+/reports/**/*

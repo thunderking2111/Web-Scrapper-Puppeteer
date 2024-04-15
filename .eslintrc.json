@@ -40,5 +40,8 @@
       "destructuring": "all",
       "ignoreReadBeforeAssign": true
     }]
+  },
+  "globals": {
+    "infoBoxIndex": "readonly"
   }
 }

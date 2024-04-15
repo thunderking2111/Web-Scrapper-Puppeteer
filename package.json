@@ -19,6 +19,8 @@
   "author": "Rahul Prajapati",
   "license": "MIT",
   "dependencies": {
+    "csv-writer": "^1.6.0",
+    "exceljs": "^4.4.0",
     "puppeteer": "^22.6.3"
   },
   "devDependencies": {
